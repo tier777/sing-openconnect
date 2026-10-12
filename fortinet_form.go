@@ -159,7 +159,7 @@ func parseFortinetTokenInfo(content []byte, username string) (*fortinetAuthentic
 	return form, nil
 }
 
-func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, error) {
+func parseFortinetHTMLChallenge(content []byte, authenticatedUsername ...string) (*fortinetAuthenticationForm, error) {
 	document, parseErr := html.Parse(bytes.NewReader(content))
 	if parseErr != nil {
 		return nil, E.Cause(parseErr, "parse Fortinet HTML challenge")
@@ -185,7 +185,7 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 	walk = func(node *html.Node) error {
 		if node.Type == html.ElementNode && strings.EqualFold(node.Data, "input") {
 			fieldType := strings.ToLower(strings.TrimSpace(fortinetHTMLAttribute(node, "type")))
-			hiddenByStyle := fortinetHTMLAttribute(node, "style") == "display: none;"
+			hiddenByStyle := fortinetHTMLInputHidden(node)
 			if fieldType == "" {
 				fieldType = "text"
 			}
@@ -195,7 +195,7 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 				kind = authFormFieldHidden
 			case "password":
 				kind = AuthFormFieldPassword
-			case "text", "email":
+			case "text", "email", "number", "tel":
 				kind = AuthFormFieldText
 			case "submit", "button", "reset", "image":
 				return nil
@@ -208,6 +208,14 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 			name := strings.TrimSpace(fortinetHTMLAttribute(node, "name"))
 			if name == "" {
 				return E.New("HTML challenge input has no name")
+			}
+			if len(form.fields) >= fortinetMaximumTokenInfoFields || len(name) > fortinetMaximumTokenInfoField {
+				return E.New("HTML challenge has too many or oversized fields")
+			}
+			// Portal themes render SMS codes as text, number or password.
+			// Preserve the wire field name but always treat the value as secret.
+			if kind != authFormFieldHidden && (name == "credential" || name == "code") {
+				kind = AuthFormFieldPassword
 			}
 			form.fields = append(form.fields, fortinetAuthenticationField{
 				submissionKey: fortinetSubmissionKey(formID, len(form.fields)),
@@ -235,14 +243,47 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 		if field.name == "username" && field.kind == authFormFieldHidden {
 			usernameFound = true
 		}
-		if field.name == "credential" && field.kind == AuthFormFieldPassword {
+		if (field.name == "credential" || field.name == "code") && field.kind == AuthFormFieldPassword {
 			credentialFound = true
+		}
+	}
+	// Only carry the username already submitted within this auth session.
+	if !usernameFound && credentialFound && len(authenticatedUsername) > 0 && authenticatedUsername[0] != "" {
+		usernamePresent := false
+		for _, field := range form.fields {
+			if field.name == "username" {
+				usernamePresent = true
+			}
+		}
+		if !usernamePresent {
+			form.fields = append(form.fields, fortinetAuthenticationField{
+				submissionKey: fortinetSubmissionKey(formID, len(form.fields)),
+				name:          "username", kind: authFormFieldHidden, value: authenticatedUsername[0],
+			})
+			usernameFound = true
 		}
 	}
 	if !usernameFound || !credentialFound {
 		return nil, E.New("HTML challenge omitted hidden username or credential input")
 	}
 	return form, nil
+}
+
+func fortinetHTMLInputHidden(node *html.Node) bool {
+	for _, attribute := range node.Attr {
+		if strings.EqualFold(attribute.Key, "hidden") {
+			return true
+		}
+	}
+	for _, declaration := range strings.Split(fortinetHTMLAttribute(node, "style"), ";") {
+		name, value, found := strings.Cut(declaration, ":")
+		value = strings.ToLower(strings.TrimSpace(value))
+		value = strings.TrimSpace(strings.TrimSuffix(value, "!important"))
+		if found && strings.EqualFold(strings.TrimSpace(name), "display") && value == "none" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseFortinetHostCheckAction(content []byte) (string, bool, error) {

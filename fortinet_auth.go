@@ -393,7 +393,10 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		a.access.Unlock()
 		return nil, a.buildAuthenticationRequest(form, false, ""), nil
 	case http.StatusUnauthorized:
-		form, parseErr := parseFortinetHTMLChallenge(httpResponse.body)
+		a.access.Lock()
+		username := a.username
+		a.access.Unlock()
+		form, parseErr := parseFortinetHTMLChallenge(httpResponse.body, username)
 		if parseErr != nil {
 			return nil, nil, markTerminal(parseErr)
 		}
